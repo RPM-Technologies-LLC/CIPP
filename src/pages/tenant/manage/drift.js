@@ -95,6 +95,12 @@ const ManageDriftPage = () => {
     queryKey: 'ListIntuneTemplates',
   })
 
+  // API call to get all CA templates for displayName lookup
+  const caTemplatesApi = ApiGetCall({
+    url: '/api/ListCATemplates',
+    queryKey: 'ListCATemplates',
+  })
+
   // API call for standards comparison (when templateId is available)
   const comparisonApi = ApiGetCall({
     url: '/api/ListStandardsCompare',
@@ -106,6 +112,49 @@ const ManageDriftPage = () => {
     queryKey: `StandardsCompare-${templateId}-${tenantFilter}`,
     enabled: !!templateId && !!tenantFilter,
   })
+
+  // API call for persistent drift remediation tasks
+  const persistentDriftTasksApi = ApiGetCall({
+    url: '/api/ListScheduledItems',
+    data: {
+      tenantFilter: tenantFilter,
+      SearchTitle: 'Persistent Drift Remediation:*',
+    },
+    queryKey: `PersistentDriftTasks-${tenantFilter}`,
+    waiting: !!tenantFilter,
+  })
+
+  const persistentTaskNameSet = new Set(
+    (persistentDriftTasksApi.data || [])
+      .map((task) => (task?.Name ? String(task.Name).toLowerCase() : null))
+      .filter(Boolean)
+  )
+
+  const getDriftTaskSettingName = (standardName) => {
+    if (!standardName) return ''
+
+    const normalizedName = String(standardName)
+    const withoutPrefix = normalizedName.replace(/^standards\./, '')
+
+    if (withoutPrefix.startsWith('IntuneTemplate.')) {
+      return 'IntuneTemplate'
+    }
+
+    if (withoutPrefix.startsWith('ConditionalAccessTemplate.')) {
+      return 'ConditionalAccessTemplate'
+    }
+
+    return withoutPrefix
+  }
+
+  const hasPersistentDenyTask = (standardName) => {
+    const settingName = getDriftTaskSettingName(standardName)
+    if (!settingName || !tenantFilter) return false
+
+    const expectedTaskName =
+      `Persistent Drift Remediation: ${settingName} - ${tenantFilter}`.toLowerCase()
+    return persistentTaskNameSet.has(expectedTaskName)
+  }
 
   // Process drift data for chart - filter by current tenant and aggregate
   const rawDriftData = driftApi.data || []
@@ -189,6 +238,14 @@ const ManageDriftPage = () => {
                   displayName = template.TemplateList.label
                 }
               }
+              // If not found in standardSettings, look up in all CA templates (for tag templates)
+              if (!displayName && Array.isArray(caTemplatesApi.data)) {
+                const template = caTemplatesApi.data.find((t) => t.GUID === guid)
+                if (template?.displayName) {
+                  displayName = template.displayName
+                }
+              }
+
               // If template not found, return null to filter it out later
               if (!displayName) {
                 return null
@@ -512,6 +569,7 @@ const ManageDriftPage = () => {
           : isLicenseSkipped
             ? 'Skipped - No License Available'
             : getDeviationStatusText(actualStatus)
+        const isPersistentDenyEnabled = hasPersistentDenyTask(deviation.standardName)
 
         // For skipped items, show different expected/received values
         let displayExpectedValue = deviation.ExpectedValue || deviation.expectedValue
@@ -536,15 +594,29 @@ const ManageDriftPage = () => {
           text: prettyName,
           subtext: description,
           statusColor: isLicenseSkipped ? 'text.secondary' : getDeviationColor(actualStatus),
-          statusText: actualStatusText,
+          statusText: isPersistentDenyEnabled
+            ? `${actualStatusText} | Persistent deny (12h)`
+            : actualStatusText,
           standardName: deviation.standardName, // Store the original standardName for action handlers
           receivedValue: deviation.receivedValue, // Store the original receivedValue for action handlers
           expectedValue: deviation.expectedValue, // Store the original expectedValue for action handlers
           originalDeviation: deviation, // Store the complete original deviation object for reference
           isLicenseSkipped: isLicenseSkipped, // Flag for filtering and disabling actions
           isActuallyCompliant: isActuallyCompliant, // Flag to move to compliant section
+          isPersistentDenyEnabled: isPersistentDenyEnabled,
           children: (
             <Stack spacing={2} sx={{ p: 2 }}>
+              {isPersistentDenyEnabled && (
+                <Box>
+                  <Chip
+                    size="small"
+                    color="warning"
+                    variant="outlined"
+                    label="Permanently denied - resets every 12 hours"
+                  />
+                </Box>
+              )}
+
               {description && description !== 'No description available' && (
                 <Typography variant="body2" color="text.secondary">
                   {description}
@@ -1134,6 +1206,17 @@ const ManageDriftPage = () => {
   const handleDeviationAction = (action, deviation) => {
     if (!deviation) return
 
+    const resolvedReceivedValue =
+      deviation.receivedValue ??
+      deviation.CurrentValue ??
+      deviation.currentValue ??
+      deviation.originalDeviation?.receivedValue ??
+      deviation.originalDeviation?.CurrentValue ??
+      deviation.originalDeviation?.currentValue ??
+      deviation.expectedValue ??
+      deviation.ExpectedValue ??
+      null
+
     let status
     let actionText
     switch (action) {
@@ -1168,7 +1251,7 @@ const ManageDriftPage = () => {
           {
             standardName: deviation.standardName, // Use the standardName from the original deviation data
             status: status,
-            receivedValue: deviation.receivedValue,
+            receivedValue: resolvedReceivedValue,
           },
         ],
         tenantFilter: tenantFilter,
@@ -1293,6 +1376,7 @@ const ManageDriftPage = () => {
   )
 
   // Actions for the ActionsMenu
+  const currentDriftTemplate = standardsApi.data?.find((t) => t.GUID === templateId)
   const actions = createDriftManagementActions({
     templateId,
     onRefresh: () => {
@@ -1306,6 +1390,12 @@ const ManageDriftPage = () => {
       setTriggerReport(true)
     },
     currentTenant: tenantFilter,
+    templateTenants: Array.isArray(currentDriftTemplate?.tenantFilter)
+      ? currentDriftTemplate.tenantFilter
+      : [],
+    excludedTenants: Array.isArray(currentDriftTemplate?.excludedTenants)
+      ? currentDriftTemplate.excludedTenants
+      : [],
   })
 
   // Effect to trigger the ExecutiveReportButton when needed
@@ -1407,6 +1497,25 @@ const ManageDriftPage = () => {
     ),
   }))
 
+  // Add action buttons to compliant/aligned items so previously denied and now compliant entries
+  // can be denied again or denied with remediation persistence.
+  const alignedItemsWithActions = allAlignedItems.map((item) => ({
+    ...item,
+    cardLabelBoxActions: (
+      <Button
+        variant="outlined"
+        endIcon={<ExpandMore />}
+        onClick={(e) => {
+          e.stopPropagation()
+          handleMenuClick(e, `aligned-${item.id}`)
+        }}
+        size="small"
+      >
+        Actions
+      </Button>
+    ),
+  }))
+
   // Calculate compliance metrics for badges
   // Accepted and Customer Specific deviations count as compliant since they are user-approved
   // Denied deviations are included in total but not in compliant count (they haven't been fixed yet)
@@ -1485,7 +1594,7 @@ const ManageDriftPage = () => {
   const filteredAcceptedItems = applyFilters(acceptedDeviationItemsWithActions)
   const filteredCustomerSpecificItems = applyFilters(customerSpecificDeviationItemsWithActions)
   const filteredDeniedItems = applyFilters(deniedDeviationItemsWithActions)
-  const filteredAlignedItems = applyFilters(allAlignedItems)
+  const filteredAlignedItems = applyFilters(alignedItemsWithActions)
   const filteredLicenseSkippedItems = applyFilters(licenseSkippedItems)
 
   // Helper function to render items grouped by category when category sort is active
@@ -1569,7 +1678,12 @@ const ManageDriftPage = () => {
       subtitle={subtitle}
       actions={actions}
       actionsData={{}}
-      isFetching={driftApi.isFetching || standardsApi.isFetching || comparisonApi.isFetching}
+      isFetching={
+        driftApi.isFetching ||
+        standardsApi.isFetching ||
+        comparisonApi.isFetching ||
+        persistentDriftTasksApi.isFetching
+      }
     >
       <CippHead title="Manage Drift" />
       <Box sx={{ py: 2 }}>
@@ -1918,12 +2032,7 @@ const ManageDriftPage = () => {
                       <Typography variant="h6" sx={{ mb: 2 }}>
                         Compliant Standards
                       </Typography>
-                      <CippBannerListCard
-                        items={filteredAlignedItems}
-                        isCollapsible={true}
-                        layout={'single'}
-                        isFetching={driftApi.isFetching}
-                      />
+                      {renderItemsByCategory(filteredAlignedItems)}
                     </Box>
                   )}
 
@@ -1989,7 +2098,7 @@ const ManageDriftPage = () => {
             },
           }}
           row={actionData.data}
-          relatedQueryKeys={[`TenantDrift-${tenantFilter}`]}
+          relatedQueryKeys={[`TenantDrift-${tenantFilter}`, `PersistentDriftTasks-${tenantFilter}`]}
         />
       )}
 
@@ -2150,6 +2259,15 @@ const ManageDriftPage = () => {
         >
           <MenuItem
             onClick={() => {
+              handleDeviationAction('deny', item)
+              handleMenuClose(`denied-${item.id}`)
+            }}
+          >
+            <Error sx={{ mr: 1, color: 'error.main' }} />
+            Rerun standard to align with template
+          </MenuItem>
+          <MenuItem
+            onClick={() => {
               handleDeviationAction('deny-remediate', item)
               handleMenuClose(`denied-${item.id}`)
             }}
@@ -2174,6 +2292,34 @@ const ManageDriftPage = () => {
           >
             <CheckCircle sx={{ mr: 1, color: 'info.main' }} />
             Accept - Customer Specific
+          </MenuItem>
+        </Menu>
+      ))}
+
+      {alignedItemsWithActions.map((item) => (
+        <Menu
+          key={`menu-aligned-${item.id}`}
+          anchorEl={anchorEl[`aligned-${item.id}`]}
+          open={Boolean(anchorEl[`aligned-${item.id}`])}
+          onClose={() => handleMenuClose(`aligned-${item.id}`)}
+        >
+          <MenuItem
+            onClick={() => {
+              handleDeviationAction('deny', item)
+              handleMenuClose(`aligned-${item.id}`)
+            }}
+          >
+            <Error sx={{ mr: 1, color: 'error.main' }} />
+            Rerun standard to align with template
+          </MenuItem>
+          <MenuItem
+            onClick={() => {
+              handleDeviationAction('deny-remediate', item)
+              handleMenuClose(`aligned-${item.id}`)
+            }}
+          >
+            <Cancel sx={{ mr: 1, color: 'error.main' }} />
+            Deny - Remediate to align with template
           </MenuItem>
         </Menu>
       ))}
