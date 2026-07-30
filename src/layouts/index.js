@@ -180,6 +180,7 @@ export const Layout = (props) => {
             // check sub-items
             if (item.items && item.items.length > 0) {
               const filteredSubItems = filterItemsByRole(item.items).filter(Boolean)
+              if (filteredSubItems.length === 0) return null
               return { ...item, items: filteredSubItems }
             }
 
@@ -262,7 +263,7 @@ export const Layout = (props) => {
   })
 
   const alertsAPI = ApiGetCall({
-    url: `/api/GetCippAlerts?localversion=${version?.data?.version}`,
+    url: `/api/GetCippAlerts?localversion=${encodeURIComponent(version?.data?.version)}`,
     queryKey: 'alertsDashboard',
     waiting: false,
     refetchOnMount: false,
@@ -342,15 +343,13 @@ export const Layout = (props) => {
           <SubscriptionEndedDialog hostedSubscriptionEnded={currentRole.data?.hostedSubscriptionEnded} />
           <FailedPaymentDialog hostedFailedPayments={currentRole.data?.hostedFailedPayments} />
           <SsoMigrationDialog meData={currentRole.data} />
-          <ForcedSsoMigrationDialog />
+          <ForcedSsoMigrationDialog setupCompleted={setupCompleted} />
           {!setupCompleted && (
-            <Box sx={{ flexGrow: 1, py: 2 }}>
-              <Container maxWidth={false}>
-                <Alert severity="info">
-                  Setup has not been completed.
-                  <Button onClick={createDialog.handleOpen}>Start Wizard</Button>
-                </Alert>
-              </Container>
+            <Box sx={{ py: 2, px: 3, flexShrink: 0 }}>
+              <Alert severity="info">
+                Setup has not been completed.
+                <Button onClick={createDialog.handleOpen}>Start Wizard</Button>
+              </Alert>
             </Box>
           )}
           {(currentTenant === 'AllTenants' || !currentTenant) && !allTenantsSupport ? (

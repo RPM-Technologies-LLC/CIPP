@@ -146,7 +146,10 @@ export const CippAutoComplete = React.forwardRef((props, ref) => {
   const currentTenant = api?.tenantFilter ? api.tenantFilter : useSettings().currentTenant
   useEffect(() => {
     if (actionGetRequest.isSuccess && !actionGetRequest.isFetching) {
-      const lastPage = actionGetRequest.data?.pages[actionGetRequest.data.pages.length - 1]
+      // Guard against a non-paginated cache shape (e.g. when a queryKey is accidentally shared
+      // with a useQuery/ApiGetCall consumer that stores a plain array instead of { pages }).
+      const pages = actionGetRequest.data?.pages
+      const lastPage = Array.isArray(pages) ? pages[pages.length - 1] : undefined
       const nextLinkExists = lastPage?.Metadata?.nextLink
       if (nextLinkExists) {
         actionGetRequest.fetchNextPage()
@@ -162,14 +165,18 @@ export const CippAutoComplete = React.forwardRef((props, ref) => {
   useEffect(() => {
     const currentApi = apiRef.current
     if (currentApi) {
+      const tenantScoped = !currentApi.excludeTenantFilter
       setGetRequestInfo({
         url: currentApi.url,
         data: {
-          ...(!currentApi.excludeTenantFilter ? { tenantFilter: currentTenant } : null),
+          ...(tenantScoped ? { tenantFilter: currentTenant } : null),
           ...currentApi.data,
         },
         waiting: true,
-        queryKey: currentApi.queryKey,
+        queryKey:
+          tenantScoped && currentApi.queryKey
+            ? `${currentApi.queryKey}-${currentTenant}`
+            : currentApi.queryKey,
       })
     }
   }, [apiUrl, apiQueryKey, currentTenant])
@@ -262,7 +269,7 @@ export const CippAutoComplete = React.forwardRef((props, ref) => {
       finalOptions = finalOptions.filter((o) => !removeOptions.includes(o.value))
     }
     if (sortOptions) {
-      finalOptions.sort((a, b) => a.label?.localeCompare(b.label))
+      finalOptions.sort((a, b) => String(a.label ?? "").localeCompare(String(b.label ?? "")))
     }
     return finalOptions
   }, [api, usedOptions, options, removeOptions, sortOptions])
@@ -470,11 +477,14 @@ export const CippAutoComplete = React.forwardRef((props, ref) => {
             if (!api && option.label !== undefined) {
               return option.label === null ? '' : String(option.label)
             }
-            // For API options, use the existing logic
+            // For API options, use the existing logic. An empty/valueless option renders
+            // blank; the debug hint only shows when a real value is missing its label.
             if (api) {
-              return option.label === null
-                ? ''
-                : option.label || 'Label not found - Are you missing a labelField?'
+              if (option.label === null || option.label === '') return ''
+              if (option.label === undefined && (option.value === undefined || option.value === null || option.value === '')) {
+                return ''
+              }
+              return option.label || 'Label not found - Are you missing a labelField?'
             }
             // Fallback for any edge cases (e.g. preset filter objects with filterName)
             return (
